@@ -1,0 +1,209 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  GO_VERSION: '1.21'
+  PROJECT_NAME: 'koneksi-drive'
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # Linux builds
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+
+          # macOS builds (FUSE for macOS)
+          - os: darwin
+            arch: amd64
+            runner: macos-latest
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Install FUSE dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev
+
+      - name: Install FUSE dependencies (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          brew install --cask macfuse
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 1
+        run: |
+          # Set output filename
+          OUTPUT_NAME="${{ env.PROJECT_NAME }}-${{ matrix.os }}-${{ matrix.arch }}"
+          
+          # Cross-compilation settings for Linux ARM64
+          if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            export CC=aarch64-linux-gnu-gcc
+            export CXX=aarch64-linux-gnu-g++
+          fi
+          
+          # Build the binary
+          echo "Building $OUTPUT_NAME..."
+          go build -ldflags="-s -w" -o "$OUTPUT_NAME" .
+          
+          # Verify the binary was created
+          ls -la "$OUTPUT_NAME"
+        shell: bash
+
+      - name: Create archive
+        run: |
+          OUTPUT_NAME="${{ env.PROJECT_NAME }}-${{ matrix.os }}-${{ matrix.arch }}"
+          
+          # Create archive
+          tar -czf "$OUTPUT_NAME.tar.gz" "$OUTPUT_NAME" README.md
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            *.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find ./artifacts -name "*.tar.gz" | while read file; do
+            cp "$file" ./release/
+          done
+          ls -la ./release/
+
+      - name: Calculate checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Koneksi Drive - FUSE Filesystem for Koneksi Storage
+            
+            Mount your Koneksi storage as a local filesystem using FUSE.
+            
+            ### Installation
+            
+            #### Linux
+            ```bash
+            # Install FUSE (if not already installed)
+            sudo apt-get install fuse libfuse2  # Debian/Ubuntu
+            sudo yum install fuse fuse-libs     # RHEL/CentOS
+            
+            # Download and extract
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/koneksi-drive-linux-amd64.tar.gz
+            tar -xzf koneksi-drive-linux-amd64.tar.gz
+            chmod +x koneksi-drive-linux-amd64
+            sudo mv koneksi-drive-linux-amd64 /usr/local/bin/koneksi-drive
+            ```
+            
+            #### macOS
+            ```bash
+            # Install macFUSE (required)
+            brew install --cask macfuse
+            
+            # Download and extract
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/koneksi-drive-darwin-amd64.tar.gz
+            tar -xzf koneksi-drive-darwin-amd64.tar.gz
+            chmod +x koneksi-drive-darwin-amd64
+            sudo mv koneksi-drive-darwin-amd64 /usr/local/bin/koneksi-drive
+            ```
+            
+            ### Configuration
+            
+            Create `~/.koneksi-drive.yaml`:
+            ```yaml
+            api:
+              base_url: "https://your-koneksi-instance.com"
+              client_id: "your-client-id"
+              client_secret: "your-client-secret"
+              directory_id: "your-directory-id"
+              timeout: 30s
+              retry_count: 3
+            
+            mount:
+              readonly: false
+              allow_other: false
+            
+            cache:
+              enabled: true
+              ttl: 5m
+              max_size: 1073741824  # 1GB
+            ```
+            
+            ### Usage
+            
+            ```bash
+            # Mount Koneksi storage to a directory
+            koneksi-drive mount ~/koneksi-storage
+            
+            # Mount as read-only
+            koneksi-drive mount --readonly ~/koneksi-storage
+            
+            # Mount with cache disabled
+            koneksi-drive mount --cache-ttl=0 ~/koneksi-storage
+            ```
+            
+            ### Checksums
+            
+            Verify your download with the SHA256SUMS.txt file included in the release.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
