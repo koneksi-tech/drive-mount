@@ -75,7 +75,9 @@ func (kfs *KoneksiFS) Mount(mountpoint string) error {
 		opts.Options = append(opts.Options, "ro")
 	}
 
-	server, err := fs.Mount(mountpoint, kfs.root, opts)
+	server, err := fs.Mount(mountpoint, kfs.root, &fs.Options{
+		MountOptions: *opts,
+	})
 	if err != nil {
 		return fmt.Errorf("mount failed: %w", err)
 	}
